@@ -3,6 +3,7 @@ package com.example.urlshortener.service;
 import com.example.urlshortener.domain.ShortLink;
 import com.example.urlshortener.repository.ShortLinkRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -10,6 +11,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.net.URI;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Instant;
 
 @Service
@@ -19,19 +21,20 @@ public class ShortLinkService {
     private static final int MAX_CODE_ATTEMPTS = 5;
 
     private final ShortLinkRepository repository;
+    private final Clock clock;
     private final String publicBaseUrl;
     private final SecureRandom random = new SecureRandom();
 
-    public ShortLinkService(ShortLinkRepository repository,
+    public ShortLinkService(ShortLinkRepository repository, Clock clock,
             @Value("${shortener.public-base-url:http://localhost:8080}") String publicBaseUrl) {
         this.repository = repository;
+        this.clock = clock;
         this.publicBaseUrl = publicBaseUrl.replaceAll("/+$", "");
     }
 
-    @Transactional
     public ShortLink create(String originalUrl, Instant expiresAt) {
         validateUrl(originalUrl);
-        if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
+        if (expiresAt != null && !expiresAt.isAfter(clock.instant())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "expiresAt must be in the future");
         }
 
@@ -40,20 +43,31 @@ public class ShortLinkService {
             if (repository.existsById(code)) {
                 continue;
             }
-            return repository.saveAndFlush(new ShortLink(code, originalUrl, expiresAt));
+            try {
+                return repository.saveAndFlush(new ShortLink(code, originalUrl, expiresAt));
+            } catch (DataIntegrityViolationException collision) {
+                if (attempt == MAX_CODE_ATTEMPTS - 1) {
+                    throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                            "Could not allocate a unique short code", collision);
+                }
+            }
         }
         throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Could not allocate a short code");
     }
 
     @Transactional
     public String resolveAndRecordClick(String code) {
-        ShortLink link = repository.findById(code)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Short link not found"));
-        if (link.getExpiresAt() != null && !link.getExpiresAt().isAfter(Instant.now())) {
-            throw new ResponseStatusException(HttpStatus.GONE, "Short link has expired");
+        int updated = repository.incrementClickCountIfActive(code, clock.instant());
+        if (updated == 0) {
+            ShortLink link = repository.findById(code)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Short link not found"));
+            if (link.getExpiresAt() != null && !link.getExpiresAt().isAfter(clock.instant())) {
+                throw new ResponseStatusException(HttpStatus.GONE, "Short link has expired");
+            }
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Could not record the redirect");
         }
-        link.recordClick();
-        return link.getOriginalUrl();
+        return repository.findOriginalUrlByCode(code)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Short link not found"));
     }
 
     @Transactional(readOnly = true)
