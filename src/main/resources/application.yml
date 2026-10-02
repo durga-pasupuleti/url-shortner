@@ -1,0 +1,23 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+shortener:
+  public-base-url: ${SHORTENER_PUBLIC_BASE_URL:http://localhost:${server.port}}
+
+spring:
+  datasource:
+    url: ${SHORTENER_DATABASE_URL:jdbc:h2:file:./url-shortener-db;DB_CLOSE_ON_EXIT=FALSE}
+    username: ${SHORTENER_DATABASE_USERNAME:sa}
+    password: ${SHORTENER_DATABASE_PASSWORD:}
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  h2:
+    console:
+      enabled: false
+
+logging:
+  level:
+    com.example.urlshortener: INFO
